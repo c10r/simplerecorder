@@ -49,50 +49,74 @@ class ScreenRecorder(QWidget):
 
         self.setWindowTitle('Screen Recorder')
         self.show()
-    
+
+    '''
+
+    Use this to find the active window and its dimentions:
+        xwininfo -id $(xdotool getactivewindow)
+
+    For optimal performance, make sure the width and height are divisible by 16.
+    If they are not, round up to the closest multiple of 16.
+
+    Test the following command on a window, given its ID, width, and height:
+
+    gst-launch-1.0 -e \
+        ximagesrc xid=<WINDOW_ID> use-damage=1 \
+        ! video/x-raw,framerate=30/1 \
+        ! videoscale method=0 \
+        ! video/x-raw,width=<WIDTH>,height=<HEIGHT> \
+        ! videoconvert \
+        ! video/x-raw,format=I420 \
+        ! x264enc tune=zerolatency \
+        ! mp4mux \
+        ! filesink location=output.mp4
+    '''
+
     def startRecording(self):
         self.pipeline = Gst.Pipeline.new("screen-audio-recording")
 
         # Build the GStreamer pipeline based on selection
-        ximagesrc = Gst.ElementFactory.make("ximagesrc", "ximagesrc")
-        ximagesrc.set_property("use-damage", True)
-
-        if self.specificWindowButton.isChecked():
-            self.window_id = self.selectWindow()
-            if not self.window_id:
-                print("No window selected.")
-                self.stopRecording()
-                return  # User cancelled or failed to select a window
-            ximagesrc.set_property("xid", int(self.window_id))
 
         # Create video elements
+        ximagesrc = Gst.ElementFactory.make("ximagesrc", "ximagesrc")
         videoscale = Gst.ElementFactory.make("videoscale", "videoscale")
         videoconvert = Gst.ElementFactory.make("videoconvert", "videoconvert")
         x264enc = Gst.ElementFactory.make("x264enc", "x264enc")
         video_queue = Gst.ElementFactory.make("queue", "video_queue")
-
-        # Create audio elements
-        if self.audioCheckBox.isChecked():
-            pulsesrc = Gst.ElementFactory.make("pulsesrc", "pulsesrc")
-            audioconvert = Gst.ElementFactory.make("audioconvert", "audioconvert")
-            voaacenc = Gst.ElementFactory.make("voaacenc", "voaacenc")
-            audio_queue = Gst.ElementFactory.make("queue", "audio_queue")
 
         # Create muxer and sink
         mp4mux = Gst.ElementFactory.make("mp4mux", "mp4mux")
         filesink = Gst.ElementFactory.make("filesink", "filesink")
 
         # Check all elements are created
-        if not all([ximagesrc, videoscale, videoconvert, x264enc, video_queue, mp4mux, filesink]):
+        if not all([ximagesrc, videoscale, videoconvert,
+                   x264enc, video_queue, mp4mux, filesink]):
             print("Failed to create GStreamer elements.")
             sys.exit(1)
 
+        # Create audio elements if applicable
         if self.audioCheckBox.isChecked():
+            pulsesrc = Gst.ElementFactory.make("pulsesrc", "pulsesrc")
+            audioconvert = Gst.ElementFactory.make(
+                "audioconvert", "audioconvert")
+            voaacenc = Gst.ElementFactory.make("voaacenc", "voaacenc")
+            audio_queue = Gst.ElementFactory.make("queue", "audio_queue")
+
             if not all([pulsesrc, audioconvert, voaacenc, audio_queue]):
                 print("Failed to create GStreamer audio elements.")
                 sys.exit(1)
 
         # Set element properties
+        if self.specificWindowButton.isChecked():
+            [self.window_id, width, height] = self.selectWindow()
+            if not self.window_id:
+                print("No window selected.")
+                self.stopRecording()
+                return  # User cancelled or failed to select a window
+            ximagesrc.set_property("xid", int(self.window_id))
+            adjust_width = int(width / 16) * 16
+            adjusted_height = int(height / 16) * 16
+
         ximagesrc.set_property("use-damage", 1)
         videoscale.set_property("method", 0)
         x264enc.set_property("tune", "zerolatency")
@@ -100,11 +124,20 @@ class ScreenRecorder(QWidget):
 
         # Create caps
         caps1 = Gst.Caps.from_string("video/x-raw,framerate=30/1")
-        caps2 = Gst.Caps.from_string("video/x-raw")
+        if self.specificWindowButton.isChecked():
+            caps2 = Gst.Caps.from_string(
+                f"video/x-raw,width={adjust_width},height={adjusted_height}")
+        else:
+            caps2 = Gst.Caps.from_string("video/x-raw")
         caps3 = Gst.Caps.from_string("video/x-raw,format=I420")
 
         # Add elements to the pipeline
-        for elem in [ximagesrc, videoscale, videoconvert, x264enc, video_queue]:
+        for elem in [
+                ximagesrc,
+                videoscale,
+                videoconvert,
+                x264enc,
+                video_queue]:
             self.pipeline.add(elem)
 
         if self.audioCheckBox.isChecked():
@@ -195,6 +228,7 @@ class ScreenRecorder(QWidget):
     def selectWindow(self):
         try:
             # Run xwininfo to get the window ID
+            # TODO: Figure out a more elegant solution than using xwininfo
             result = subprocess.run(
                 ['xwininfo', '-int'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             if result.returncode != 0:
@@ -205,8 +239,12 @@ class ScreenRecorder(QWidget):
             for line in output.splitlines():
                 if "Window id:" in line:
                     window_id = line.split()[3]
-                    print(f"Selected window ID: {window_id}")
-                    return window_id
+                if "Width:" in line:
+                    width = int(line.split()[1].strip())
+                if "Height:" in line:
+                    height = int(line.split()[1].strip())
+            if window_id is not None and width is not None and height is not None:
+                return (window_id, width, height)
             print("Window ID not found")
             return None
         except Exception as e:
@@ -251,7 +289,7 @@ class ScreenRecorder(QWidget):
     def closeEvent(self, event):
         # Ensure the gst-launch process is terminated when the app is closed
         if self.pipeline:
-            self.stop_recording()
+            self.stopRecording()
         event.accept()
 
 
